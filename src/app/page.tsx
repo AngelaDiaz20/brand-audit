@@ -1,25 +1,38 @@
-"use client";
+"use client"
 
-import Dropzone from "@/components/Dropzone";
 import { useState } from "react";
+import Dropzone from "@/components/Dropzone";
+import AnalysisProgress from "@/components/AnalysisProgress";
+import AnalysisReport from "@/components/AnalysisReport";
 
 export default function HomePage() {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [analysisData, setAnalysisData] = useState<any | null>(null);
 
-  const handleFileSelect = (file: File | null) => {
-    setSelectedFile(file);
+  const handleComplete = (result: any) => {
+    setAnalysisData(result);
+  };
+
+  const handleRestart = () => {
+    setSelectedFile(null);
+    setAnalysisData(null);
   };
 
   return (
     <main className="min-h-screen flex flex-col items-center justify-center bg-gray-100 p-6">
-      <h1 className="text-2xl font-bold mb-6">🧠 Sistema de Análisis IA</h1>
-      <Dropzone onFileSelect={handleFileSelect} />
-
-      {selectedFile && (
-        <div className="mt-4 text-sm text-gray-700 bg-white p-4 rounded-xl shadow">
-          <p><strong>Archivo seleccionado:</strong> {selectedFile.name}</p>
-          <p><strong>Tamaño:</strong> {(selectedFile.size / 1024).toFixed(2)} KB</p>
-        </div>
+      {!selectedFile ? (
+        <>
+          <h1 className="text-2xl font-bold mb-6">🧠 Sistema de Análisis IA</h1>
+          <Dropzone onFileSelect={setSelectedFile} />
+        </>
+      ) : !analysisData ? (
+        <AnalysisProgress file={selectedFile} onComplete={handleComplete} />
+      ) : (
+        <AnalysisReport
+          analysis={analysisData.analysis}
+          recommendations={analysisData.recommendations}
+          onRestart={handleRestart}
+        />
       )}
     </main>
   );
