@@ -6,13 +6,23 @@ import { getDominantColors } from "@/lib/analyzer/getDominantColors";
 import { computeColorRatios } from "@/lib/analyzer/computeColorRatios";
 import { readColorProfile } from "@/lib/analyzer/readColorProfile";
 import { useOCR } from "@/hooks/useOCR";
+import { computeTextAreaPct } from "@/lib/analyzer/textRegions";
+import { validateFormat, checkSafeArea } from "@/lib/analyzer/formatPresets";
+
 import TechHeader from "@/components/ui/TechHeader";
 import PaletteCard from "@/components/ui/PaletteCard";
+import RegionsOverlay from "@/components/ui/RegionsOverlay";
+import FormatCard from "@/components/ui/FormatCard";
 
 export default function AnalysisProgress({ file }: { file: File | null }) {
   const [status, setStatus] = useState("Esperando archivo...");
   const [error, setError] = useState<string | null>(null);
-  const [summary, setSummary] = useState<any>(null);
+
+  const [meta, setMeta] = useState<any>(null);
+  const [palette, setPalette] = useState<{ hex: `#${string}`; pct: number }[] | null>(null);
+  const [ocr, setOcr] = useState<any>(null);
+  const [layout, setLayout] = useState<any>(null);
+  const [formatInfo, setFormatInfo] = useState<any>(null);
 
   const runningRef = useRef(false);
   const { recognize } = useOCR();
@@ -24,59 +34,50 @@ export default function AnalysisProgress({ file }: { file: File | null }) {
 
     (async () => {
       try {
-        // 1) Paleta base
-        setStatus("🎨 Analizando colores dominantes…");
+        // 1) Colores (paleta + %)
+        setStatus("🎨 Analizando colores…");
         const basePalette = await getDominantColors(file, 5);
-
-        // 2) Ratios por color
-        setStatus("📊 Calculando proporciones por color…");
         const colorRatios = await computeColorRatios(file, basePalette);
+        setPalette(colorRatios);
 
-        // 3) Layout
+        // 2) Layout
         setStatus("📐 Analizando layout…");
-        const layout = await computeClientLayout(file);
+        const ly = await computeClientLayout(file);
+        setLayout(ly);
 
-        // 4) Perfil de color
+        // 3) Perfil ICC
         setStatus("🧪 Leyendo perfil ICC…");
         const profile = await readColorProfile(file);
 
-        // 5) OCR
-        setStatus("🔤 Extrayendo texto (OCR)…");
-        const ocr = await recognize(file, "spa+eng", 25000);
+        // 4) OCR
+        setStatus("🔤 Extrayendo texto…");
+        const oc = await recognize(file, "spa+eng", 30000);
+        setOcr(oc);
 
-        // 6) API (simulada)
-        setStatus("📤 Preparando resumen…");
-        const res = await fetch("/api/analyze", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            meta: {
-              name: file.name,
-              sizeKB: +(file.size / 1024).toFixed(1),
-              width: layout.width,
-              height: layout.height,
-              colorProfile: profile,
-            },
-            colors: colorRatios, // ← con % listo
-            layout,
-            ocr,
-          }),
+        // 5) % texto (si hay words; si no, 0)
+       const textPct = await computeTextAreaPct(ly.width, ly.height, oc.words, 300, file);
+
+
+        // 6) Formato + safe area (usa cajas si existen)
+        const fmt = validateFormat(ly.width, ly.height);
+        const boxes = (oc.words ?? []).map((w: any) => w.bbox);
+        const safe = checkSafeArea(ly.width, ly.height, boxes, fmt.preset?.safeMarginPct ?? 5);
+
+        setFormatInfo({
+          preset: fmt.preset,
+          valid: fmt.valid,
+          safeAreaOk: safe.safeAreaOk,
+          safeMarginPx: safe.marginPx,
+          textAreaPct: textPct.textAreaPct,
         });
 
-        const data = await res.json();
-        if (!data.success) throw new Error(data.error || "Error en la API");
-        setSummary({
-          meta: {
-            name: file.name,
-            sizeKB: +(file.size / 1024).toFixed(1),
-            width: layout.width,
-            height: layout.height,
-            colorProfile: profile,
-          },
-          colors: colorRatios,
-          ocr,
-          layout,
-          ai: data.analysis, // simulado
+        // Meta final (para header)
+        setMeta({
+          name: file.name,
+          sizeKB: +(file.size / 1024).toFixed(1),
+          width: ly.width,
+          height: ly.height,
+          colorProfile: profile,
         });
 
         setStatus("✅ Análisis completado");
@@ -100,51 +101,63 @@ export default function AnalysisProgress({ file }: { file: File | null }) {
         <p className="text-gray-700 mt-1">{status}</p>
       </div>
 
-      {summary && (
+      {meta && layout && (
+        <TechHeader
+          name={meta.name}
+          sizeKB={meta.sizeKB}
+          width={meta.width}
+          height={meta.height}
+          colorProfile={meta.colorProfile}
+        />
+      )}
+
+      {palette && <PaletteCard colors={palette} />}
+
+      {/* Siempre mostramos el panel de OCR (aunque no haya words) */}
+      {ocr && (
+        <div className="bg-white rounded-xl shadow p-4">
+          <h3 className="font-semibold mb-2">🔤 Texto extraído (OCR)</h3>
+          <p className="text-sm text-gray-500 mb-2">
+            Confianza: {ocr.confidence}%{ocr.timedOut ? " • (timeout – resultado parcial)" : ""}
+          </p>
+          <div className="whitespace-pre-wrap text-gray-800">
+            {ocr.text || "— (No se detectó texto)"}
+          </div>
+          {ocr.debug && (
+            <p className="mt-2 text-xs text-gray-500">
+              Fuente OCR: {ocr.debug.usedSrc} • Idiomas: {ocr.debug.lang}
+            </p>
+          )}
+        </div>
+      )}
+
+      {/* Overlay de cajas solo si existen words */}
+      {ocr?.words?.length && layout && (
+        <RegionsOverlay
+          file={file!}
+          boxes={ocr.words.map((w: any) => w.bbox)}
+          naturalWidth={layout.width}
+          naturalHeight={layout.height}
+        />
+      )}
+
+      {formatInfo && layout && (
         <>
-          <TechHeader
-            name={summary.meta.name}
-            sizeKB={summary.meta.sizeKB}
-            width={summary.meta.width}
-            height={summary.meta.height}
-            colorProfile={summary.meta.colorProfile}
+          <FormatCard
+            width={layout.width}
+            height={layout.height}
+            preset={formatInfo.preset}
+            valid={formatInfo.valid}
+            safeAreaOk={formatInfo.safeAreaOk}
+            safeMarginPx={formatInfo.safeMarginPx}
           />
-
-          <PaletteCard colors={summary.colors} />
-
           <div className="bg-white rounded-xl shadow p-4">
-            <h3 className="font-semibold mb-2">🔤 Texto extraído (OCR)</h3>
-            <p className="text-sm text-gray-500 mb-2">
-              Confianza: {summary.ocr.confidence}%
-            </p>
-            <div className="whitespace-pre-wrap text-gray-800">
-              {summary.ocr.text || "—"}
-            </div>
-          </div>
-
-          <div className="bg-white rounded-xl shadow p-4">
-            <h3 className="font-semibold mb-2">📐 Métricas de composición (básicas)</h3>
-            <ul className="text-gray-800 text-sm space-y-1">
-              <li>
-                <b>Brillo promedio:</b> {summary.layout.brightnessAvg}
-              </li>
-              <li>
-                <b>Espacio negativo aprox.:</b> {summary.layout.negativeSpacePct}%
-              </li>
+            <h3 className="font-semibold mb-2">📊 Métricas adicionales</h3>
+            <ul className="text-sm text-gray-800 space-y-1">
+              <li><b>Espacio negativo aprox.:</b> {layout?.negativeSpacePct}%</li>
+              <li><b>Área ocupada por texto:</b> {formatInfo.textAreaPct}%</li>
+              <li><b>Brillo promedio:</b> {layout?.brightnessAvg}</li>
             </ul>
-          </div>
-
-          <div className="bg-white rounded-xl shadow p-4">
-            <h3 className="font-semibold mb-2">🧠 Resumen (simulado)</h3>
-            <p className="text-gray-800">{summary.ai.summary}</p>
-            <ul className="mt-2 list-disc list-inside text-gray-700">
-              {summary.ai.insights.map((i: string, k: number) => (
-                <li key={k}>{i}</li>
-              ))}
-            </ul>
-            <p className="mt-3 text-sm text-gray-500">
-              Puntuación global: <b>{summary.ai.globalScore}</b>/100
-            </p>
           </div>
         </>
       )}

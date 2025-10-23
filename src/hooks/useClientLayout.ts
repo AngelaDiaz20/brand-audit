@@ -8,13 +8,19 @@ export interface ClientLayoutStats {
   width: number;
   height: number;
   brightnessAvg: number;     // 0..255 promedio
-  negativeSpacePct: number;  // % de área blanca aproximada
+  negativeSpacePct: number;  // % de área blanca aproximada (brillo alto)
 }
 
-/** Carga segura de imagen desde URL o blob */
+/** Carga segura de imagen desde URL o blob. */
 async function loadImageFromUrl(url: string): Promise<HTMLImageElement> {
   const img = new Image();
-  if (!url.startsWith("blob:")) img.crossOrigin = "anonymous";
+
+  // ⚠️ Importante:
+  // - Para blob: NO setear crossOrigin (evita tainted canvas).
+  // - Para URLs http(s): sí se puede usar anonymous si el servidor habilita CORS.
+  if (!url.startsWith("blob:") && !url.startsWith("data:")) {
+    img.crossOrigin = "anonymous";
+  }
 
   const p = new Promise<HTMLImageElement>((resolve, reject) => {
     img.onload = () => resolve(img);
@@ -24,7 +30,7 @@ async function loadImageFromUrl(url: string): Promise<HTMLImageElement> {
   img.src = url;
 
   try {
-    // Si está disponible, decode acelera el render
+    // decode acelera y asegura decodificación previa al draw
     // @ts-ignore
     if (typeof img.decode === "function") await img.decode();
   } catch {
@@ -34,7 +40,7 @@ async function loadImageFromUrl(url: string): Promise<HTMLImageElement> {
   return p;
 }
 
-/** Convierte un archivo local en dataURL como fallback */
+/** Convierte un archivo local en dataURL como fallback. */
 function fileToDataURL(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const fr = new FileReader();
@@ -54,9 +60,7 @@ export async function computeClientLayout(file: File): Promise<ClientLayoutStats
     const dataUrl = await fileToDataURL(file);
     return await computeFromUrl(dataUrl);
   } finally {
-    try {
-      URL.revokeObjectURL(blobUrl);
-    } catch {}
+    try { URL.revokeObjectURL(blobUrl); } catch {}
   }
 }
 
@@ -73,36 +77,56 @@ async function computeFromUrl(url: string): Promise<ClientLayoutStats> {
   const height = img.naturalHeight || img.height;
   if (!width || !height) throw new Error("Imagen sin dimensiones válidas.");
 
-  // Downscale para performance
-  const targetW = Math.min(160, width);
+  // Downscale para performance (manteniendo detalle suficiente)
+  const targetW = Math.max(1, Math.min(240, width));
   const scale = targetW / width;
   const targetH = Math.max(1, Math.round(height * scale));
 
   const canvas = document.createElement("canvas");
   canvas.width = targetW;
   canvas.height = targetH;
-  const ctx = canvas.getContext("2d");
+
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
   if (!ctx) throw new Error("No se pudo crear el contexto Canvas.");
 
   ctx.drawImage(img, 0, 0, targetW, targetH);
-  const { data } = ctx.getImageData(0, 0, targetW, targetH);
+
+  // Verificación: asegurarnos de que hay datos no nulos
+  let imgData: ImageData;
+  try {
+    imgData = ctx.getImageData(0, 0, targetW, targetH);
+  } catch (err) {
+    // Si el canvas está "tainted", aquí fallaría.
+    console.error("getImageData falló (canvas tainted o sin datos):", err);
+    throw new Error("No se pudo leer los píxeles de la imagen (CORS/canvas).");
+  }
+
+  const { data } = imgData;
+  if (!data || data.length < 4) {
+    throw new Error("Datos de imagen inválidos.");
+  }
 
   let sumBrightness = 0;
   let brightPixels = 0;
-  const total = data.length / 4;
+  let counted = 0;
 
   for (let i = 0; i < data.length; i += 4) {
     const r = data[i], g = data[i + 1], b = data[i + 2], a = data[i + 3];
-    if (a === 0) continue;
+    if (a === 0) continue; // píxel transparente: ignóralo
     const brightness = 0.299 * r + 0.587 * g + 0.114 * b;
     sumBrightness += brightness;
-    if (brightness > 240) brightPixels++;
+    counted++;
+    // Umbral alto → espacio "muy claro" (ajustado un poco abajo de 240 para evitar 0%)
+    if (brightness >= 235) brightPixels++;
   }
 
-  return {
-    width,
-    height,
-    brightnessAvg: +(sumBrightness / total).toFixed(2),
-    negativeSpacePct: +((brightPixels / total) * 100).toFixed(2),
-  };
+  const brightnessAvg = counted ? +(sumBrightness / counted).toFixed(2) : 0;
+  const negativeSpacePct = counted
+    ? +(((brightPixels / counted) * 100).toFixed(2))
+    : 0;
+
+  // Debug mínimo: primeros 12 bytes para validar que no sea todo 0
+  console.debug("🔎 [computeClientLayout] sample RGBA:", Array.from(data.slice(0, 12)));
+
+  return { width, height, brightnessAvg, negativeSpacePct };
 }
