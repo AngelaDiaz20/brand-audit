@@ -1,100 +1,90 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useRef } from "react";
+import { computeClientLayout } from "@/hooks/useClientLayout";
+import { getDominantColors } from "@/lib/analyzer/getDominantColors";
+import { useOCR } from "@/hooks/useOCR";
 
-interface AnalysisProgressProps {
-  file: File;
-  onComplete: (result: { analysis: any; recommendations: string }) => void;
-}
-
-export default function AnalysisProgress({ file, onComplete }: AnalysisProgressProps) {
-  const [statusText, setStatusText] = useState("Iniciando análisis...");
-  const [currentStep, setCurrentStep] = useState("");
-
-  const steps = [
-    { id: "color", label: "🎨 Analizando paleta de colores..." },
-    { id: "layout", label: "🧱 Analizando composición visual..." },
-    // OCR y GPT desactivados mientras tanto
-  ];
+export default function AnalysisProgress({ file }: { file: File | null }) {
+  const [status, setStatus] = useState("Esperando archivo...");
+  const [error, setError] = useState<string | null>(null);
+  const [result, setResult] = useState<any>(null);
+  const { recognize } = useOCR();
+  const runningRef = useRef(false);
 
   useEffect(() => {
-    const analyze = async () => {
+    if (!file) return;
+    if (runningRef.current) return;
+    runningRef.current = true;
+
+    (async () => {
       try {
-        const formData = new FormData();
-        formData.append("file", file);
+        setStatus("🎨 Analizando colores...");
+        const colors = await getDominantColors(file, 5);
+        console.log("🎨 Colores dominantes:", colors);
 
-        const res = await fetch("/api/analyze?noai=1", { method: "POST", body: formData });
+        setStatus("📐 Analizando layout...");
+        const layout = await computeClientLayout(file);
+        console.log("📐 Layout:", layout);
 
-        if (!res.ok) {
-          let msg = "Error en el análisis IA";
-          try {
-            const err = await res.json();
-            if (err?.error) msg = err.error;
-          } catch {}
-          throw new Error(msg);
-        }
+        setStatus("🧠 Leyendo texto (OCR)...");
+        const ocr = await recognize(file, "spa+eng");
+        console.log("🧠 OCR:", ocr);
+
+        // ✅ Enviar todo el JSON al servidor
+        setStatus("📤 Enviando datos a la API...");
+        const res = await fetch("/api/analyze", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            meta: {
+              fileName: file.name,
+              fileSizeKB: +(file.size / 1024).toFixed(1),
+            },
+            colors,
+            layout,
+            ocr,
+          }),
+        });
 
         const data = await res.json();
+        if (!data.success) throw new Error(data.error || "Error en la API");
 
-        // 🔐 Normalizador universal
-        let analysis = data?.analysis ?? null;
-        let recommendations = data?.recommendations ?? "Modo técnico activo: sin recomendaciones IA.";
-
-        if (!analysis && data?.debug) {
-          analysis = {
-            meta: {
-              name: file.name,
-              sizeKB: +(file.size / 1024).toFixed(2),
-              format: data.debug?.metaExtra?.format,
-              colorProfile: data.debug?.metaExtra?.colorProfile,
-              hasAlpha: data.debug?.metaExtra?.hasAlpha,
-            },
-            colors: data.debug?.colors ?? [],
-            ocr: data.debug?.ocr ?? { text: "", confidence: 0 },
-            layout: data.debug?.layout ?? { width: 0, height: 0, brightnessAvg: 0, negativeSpacePct: 0 },
-            createdAt: new Date().toISOString(),
-          };
-          recommendations = "Modo técnico (respuesta debug).";
-        }
-
-        if (!analysis) throw new Error("Respuesta inesperada del servidor (sin 'analysis').");
-
-        // Animación visual por pasos
-        for (const s of steps) {
-          setCurrentStep(s.id);
-          setStatusText(s.label);
-          await new Promise((r) => setTimeout(r, 400));
-        }
-
-        onComplete({ analysis, recommendations });
-      } catch (error: any) {
-        console.error(error);
-        setStatusText(error.message || "Error inesperado.");
+        console.log("✅ Análisis completo:", data);
+        setResult(data.analysis);
+        setStatus("✅ Análisis completado con éxito");
+      } catch (e: any) {
+        console.error("🚨 Error durante el análisis:", e);
+        setError(e.message || "No se pudo completar el análisis.");
+        setStatus("❌ Error en el análisis");
+      } finally {
+        runningRef.current = false;
       }
-    };
-
-    analyze();
+    })();
   }, [file]);
 
+  if (!file) return <p className="text-gray-500">Sube una imagen para comenzar.</p>;
+  if (error) return <p className="text-red-600">Error: {error}</p>;
+
   return (
-    <div className="flex flex-col items-center justify-center bg-white p-6 rounded-xl shadow-md w-full max-w-lg text-center">
-      <h2 className="text-xl font-semibold mb-4 text-gray-800">🔍 Analizando imagen...</h2>
-      <p className="text-gray-700">{statusText}</p>
+    <div className="p-4 bg-white rounded-xl shadow-md">
+      <h2 className="font-semibold text-lg mb-2">🔍 Progreso del análisis</h2>
+      <p className="text-gray-700 mb-3">{status}</p>
 
-      {currentStep === "" && (
-        <div className="mt-4 w-8 h-8 border-4 border-blue-300 border-t-transparent rounded-full animate-spin"></div>
-      )}
-
-      {steps.map((s) => (
-        <div
-          key={s.id}
-          className={`mt-2 text-sm ${
-            currentStep === s.id ? "text-blue-600 font-medium" : "text-gray-500"
-          }`}
-        >
-          {s.label}
+      {result && (
+        <div className="mt-4 p-3 border-t border-gray-200">
+          <h3 className="font-semibold text-green-600">Resultado:</h3>
+          <p className="mt-1 text-gray-800">{result.summary}</p>
+          <ul className="mt-2 list-disc list-inside text-gray-700">
+            {result.insights.map((i: string, idx: number) => (
+              <li key={idx}>{i}</li>
+            ))}
+          </ul>
+          <p className="mt-3 text-sm text-gray-500">
+            Puntuación global: <b>{result.globalScore}</b>/100
+          </p>
         </div>
-      ))}
+      )}
     </div>
   );
 }
