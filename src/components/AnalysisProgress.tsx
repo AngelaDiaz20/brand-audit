@@ -120,14 +120,16 @@ export default function AnalysisProgress({ file }: { file: File | null }) {
           <p className="text-sm text-gray-500 mb-2">
             Confianza: {ocr.confidence}%{ocr.timedOut ? " • (timeout – resultado parcial)" : ""}
           </p>
-          <div className="whitespace-pre-wrap text-gray-800">
-            {ocr.text || "— (No se detectó texto)"}
-          </div>
-          {ocr.debug && (
-            <p className="mt-2 text-xs text-gray-500">
-              Fuente OCR: {ocr.debug.usedSrc} • Idiomas: {ocr.debug.lang}
-            </p>
-          )}
+          <p className="whitespace-pre-wrap break-words text-sm text-gray-800">
+  {ocr.cleanedText || ocr.text || "— (No se detectó texto)"}
+</p>
+
+<small className="text-gray-500 block mt-1">
+  Fuente OCR: {ocr.debug?.usedSrc ?? "N/D"} • 
+  PSM: {ocr.debug?.psm ?? "N/D"} • 
+  Modo: {ocr.debug?.strategy ?? "N/D"} • 
+  Idiomas: {ocr.debug?.lang ?? "spa+eng"}
+</small>
         </div>
       )}
 
